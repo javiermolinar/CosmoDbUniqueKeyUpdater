@@ -19,25 +19,43 @@ namespace CosmoDBCollectionPropertyUpdater
             IConfigurationRoot configuration = builder.Build();
 
             IDocumentClient client = new DocumentClient(
-                new Uri(configuration["DatabaseUri"]),
-                configuration["DatabaseToken"]);
+                new Uri(configuration["CosmoDbUri"]),
+                configuration["CosmoDbToken"]);
 
             CollectionProperties existingCollection = new CollectionProperties();
             configuration.GetSection("CollectionProperties").Bind(existingCollection);
 
-            string newCollectionName = existingCollection.CollectionName + "_";
+            string newCollectionName = existingCollection.CollectionName + configuration.GetValue<string>("TempDatabasePrefix","_");
             CollectionProperties newCollection = new CollectionProperties(existingCollection) {CollectionName = newCollectionName};
-
-            Console.WriteLine($"Creating temp collection: {newCollectionName}");
-            await CreateCollectionAsync(client,newCollection);
-            Console.WriteLine("Copying  documents from existing collection");
-            await CopyCollectionsDocumentsAsync(client, existingCollection, newCollection);
-            Console.WriteLine("Restoring collection");
-            await DeleteCollectionAsync(client, existingCollection);
-            await CreateCollectionAsync(client, existingCollection);
-            await CopyCollectionsDocumentsAsync(client, newCollection, existingCollection);
-            Console.WriteLine("Removing temp collection");
-            await DeleteCollectionAsync(client, newCollection);
+            
+            try
+            {
+                Console.WriteLine($"Creating temp collection: {newCollectionName}");
+                await CreateCollectionAsync(client,newCollection);
+                Console.WriteLine("Copying  documents from existing collection");
+                try
+                {
+                    await CopyCollectionsDocumentsAsync(client, existingCollection, newCollection);   
+                }
+                catch(Exception ex)
+                {
+                    Console.WriteLine($"There was an error copying documents, reverting the operation {ex}");                   
+                    throw;
+                }      
+                
+                Console.WriteLine("Restoring collection");
+                if(configuration.GetValue<bool>("DeleteOriginal",true)){
+                    await DeleteCollectionAsync(client, existingCollection);
+                    await CreateCollectionAsync(client, existingCollection);
+                    await CopyCollectionsDocumentsAsync(client, newCollection, existingCollection);
+                };
+            }
+            finally
+            {
+                Console.WriteLine("Removing temp collection");
+                await DeleteCollectionAsync(client, newCollection);
+            }         
+            
             Console.WriteLine("Done");
             Console.WriteLine("Press any key to exit..");
             Console.ReadLine();
@@ -81,16 +99,22 @@ namespace CosmoDBCollectionPropertyUpdater
         private static async Task CopyCollectionsDocumentsAsync(IDocumentClient client, CollectionProperties collection1, CollectionProperties collection2)
         {
 
-            var collection1Uri = UriFactory.CreateDocumentCollectionUri(collection1.DatabaseName, collection1.CollectionName);
+           var collection1Uri = UriFactory.CreateDocumentCollectionUri(collection1.DatabaseName, collection1.CollectionName);
+           var collection2Uri = UriFactory.CreateDocumentCollectionUri(collection2.DatabaseName, collection2.CollectionName);
 
-            var documents = client.CreateDocumentQuery<Document>(collection1Uri)
-                .AsEnumerable().ToList();
+           var documents = client.CreateDocumentQuery<Document>(collection1Uri)
+                .AsEnumerable().ToList();           
 
-            var collection2Uri = UriFactory.CreateDocumentCollectionUri(collection2.DatabaseName, collection2.CollectionName);
+           foreach (var document in documents)
+           {
+               await client.UpsertDocumentAsync(collection2Uri, document);
+           }
+           var documents2 = client.CreateDocumentQuery<Document>(collection2Uri)
+                .AsEnumerable().ToList();          
 
-            foreach (var document in documents)
+            if(documents.Count != documents2.Count)
             {
-                await client.UpsertDocumentAsync(collection2Uri, document);
+                throw new Exception("There was an error with the backup, the number of items is not the same, reverting the operation");
             }
         }
 
