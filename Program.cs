@@ -9,9 +9,9 @@ using Microsoft.Extensions.Configuration;
 
 namespace CosmoDBCollectionPropertyUpdater
 {
-    static class CosmoDBCollectionPropertyUpdater
+    static class CosmoDbCollectionPropertyUpdater
     {
-        static async Task Main(string[] args)
+        static async Task Main()
         {
             var builder = new ConfigurationBuilder()
                 .SetBasePath(Directory.GetCurrentDirectory())
@@ -25,31 +25,41 @@ namespace CosmoDBCollectionPropertyUpdater
             CollectionProperties existingCollection = new CollectionProperties();
             configuration.GetSection("CollectionProperties").Bind(existingCollection);
 
-            string newCollectionName = existingCollection.CollectionName + configuration.GetValue<string>("TempDatabasePrefix","_");
+            string newCollectionName = existingCollection.CollectionName + configuration.GetValue("TempDatabasePrefix","_");
             CollectionProperties newCollection = new CollectionProperties(existingCollection) {CollectionName = newCollectionName};
-            
+
             try
             {
                 Console.WriteLine($"Creating temp collection: {newCollectionName}");
-                await CreateCollectionAsync(client,newCollection);
+                await CreateCollectionAsync(client, newCollection);
                 Console.WriteLine("Copying  documents from existing collection");
                 try
                 {
-                    await CopyCollectionsDocumentsAsync(client, existingCollection, newCollection);   
+                    await CopyCollectionsDocumentsAsync(
+                        client,
+                        existingCollection,
+                        newCollection,
+                        configuration.GetValue("SkipDuplicates",false));
                 }
-                catch(Exception ex)
+                catch (Exception ex)
                 {
-                    Console.WriteLine($"There was an error copying documents, reverting the operation {ex}");                   
+                    Console.WriteLine($"There was an error copying documents, reverting the operation {ex}");
                     throw;
-                }      
-                
+                }
+
                 Console.WriteLine("Restoring collection");
-                if(configuration.GetValue<bool>("DeleteOriginal",true)){
+                if (configuration.GetValue("DeleteOriginal", true))
+                {
                     await DeleteCollectionAsync(client, existingCollection);
                     await CreateCollectionAsync(client, existingCollection);
                     await CopyCollectionsDocumentsAsync(client, newCollection, existingCollection);
-                };
+                }
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"There has been an error {ex.InnerException}");
+            }
+            
             finally
             {
                 Console.WriteLine("Removing temp collection");
@@ -96,7 +106,7 @@ namespace CosmoDBCollectionPropertyUpdater
 
         }
 
-        private static async Task CopyCollectionsDocumentsAsync(IDocumentClient client, CollectionProperties collection1, CollectionProperties collection2)
+        private static async Task CopyCollectionsDocumentsAsync(IDocumentClient client, CollectionProperties collection1, CollectionProperties collection2, bool skipDuplicates = false)
         {
 
            var collection1Uri = UriFactory.CreateDocumentCollectionUri(collection1.DatabaseName, collection1.CollectionName);
@@ -107,14 +117,32 @@ namespace CosmoDBCollectionPropertyUpdater
 
            foreach (var document in documents)
            {
-               await client.UpsertDocumentAsync(collection2Uri, document);
+               try
+               {
+                   await client.UpsertDocumentAsync(collection2Uri, document);
+               }
+               catch (DocumentClientException ex)
+               {
+                   Console.WriteLine("Found a duplicate");
+                   if (!skipDuplicates)
+                   {
+                       throw;
+                   }
+               }
+               
            }
            var documents2 = client.CreateDocumentQuery<Document>(collection2Uri)
                 .AsEnumerable().ToList();          
 
             if(documents.Count != documents2.Count)
             {
-                throw new Exception("There was an error with the backup, the number of items is not the same, reverting the operation");
+                Console.WriteLine($"There was a mismatch the original collection has {documents.Count} documents while the new one has {documents2.Count}");
+                Console.WriteLine("Press c to cancel or other key to continue");
+                var key = Console.ReadKey();
+                if (key.KeyChar == 'c')
+                {
+                    throw new Exception();
+                }
             }
         }
 
